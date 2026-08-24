@@ -19,4 +19,15 @@ public class GlobalExceptionHandler {
                 "An unexpected server error occurred.",
                 request.getRequestURI()));
     }
+
+    @ExceptionHandler(ShutdownInProgressException.class)
+    public ResponseEntity<ErrorResponse> handleShutDownInProgress(ShutdownInProgressException e, HttpServletRequest request) {
+        return ResponseEntity.status(409).body(new ErrorResponse(
+                Instant.now(),
+                409,
+                "Conflict",
+                e.getMessage(),
+                request.getRequestURI()
+        ));
+    }
 }
