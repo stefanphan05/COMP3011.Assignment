@@ -1,5 +1,6 @@
 package comp3011.assignment.client;
 
+import comp3011.assignment.exception.SpeechToTextUnavailableException;
 import comp3011.assignment.model.dto.OpenAiTranscriptionResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
@@ -8,6 +9,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.multipart.MultipartFile;
 
 /**
@@ -39,12 +41,21 @@ public class OpenAiSpeechToTextClient implements SpeechToTextClient {
         form.add("model", model);
         form.add("response_format", "json");
 
-        OpenAiTranscriptionResponse response = openAi.post()
+        OpenAiTranscriptionResponse response;
+
+        try {
+            response = openAi.post()
                 .uri("/v1/audio/transcriptions")
                 .contentType(MediaType.MULTIPART_FORM_DATA)
                 .body(form)
                 .retrieve()
                 .body(OpenAiTranscriptionResponse.class);
+        } catch (RestClientException e) {
+            throw new SpeechToTextUnavailableException(
+                "The speech-to-text service could not be reached.",
+                e
+            );
+        }
 
         if (response == null || response.text() == null) {
             throw new IllegalStateException("Transcription service returned no text.");
