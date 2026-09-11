@@ -2,6 +2,8 @@ package comp3011.assignment.exception;
 
 import comp3011.assignment.model.dto.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
@@ -12,8 +14,14 @@ import java.time.Instant;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception e, HttpServletRequest request) {
+        // Log server-side so failures are diagnosable; the client still gets a generic
+        // message so that no internal detail leaks out in the response body.
+        log.error("Unhandled exception for {} {}", request.getMethod(), request.getRequestURI(), e);
+
         return ResponseEntity.status(500).body(new ErrorResponse(
                 Instant.now(),
                 500,
