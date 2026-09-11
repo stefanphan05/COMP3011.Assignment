@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A fake speech-to-text provider used by the tests
@@ -24,6 +25,9 @@ public class StubSpeechToTextClient implements SpeechToTextClient {
     private final long outputTokens;
     private final String text;
 
+    private final AtomicInteger inFlight = new AtomicInteger();
+    private final AtomicInteger peakInFlight = new AtomicInteger();
+
     public StubSpeechToTextClient(
             @Value("${stub.stt.delay:500ms}") Duration delay,
             @Value("${stub.stt.input-tokens:10}") long inputTokens,
@@ -38,13 +42,34 @@ public class StubSpeechToTextClient implements SpeechToTextClient {
 
     @Override
     public Transcription transcribe(MultipartFile audio) {
+        int current = inFlight.incrementAndGet();
+
+        while (true) {
+            int peak = peakInFlight.get();
+
+            if (current <= peak) {
+                break;              // someone else already recorded a higher peak, nothing to do
+            }
+
+            if (peakInFlight.compareAndSet(peak, current)) {
+                break;              // this one won the race, the value is stored
+            }
+        }
+
         try {
             Thread.sleep(delay);        // pretend to wait on the network
+            return new Transcription(text, inputTokens, outputTokens);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Stub transcription was interrupted", e);
+        } finally {
+            // decrement to make the count correct
+            inFlight.decrementAndGet();
         }
-        return new Transcription(text, inputTokens, outputTokens);
+    }
+
+    public int peakConcurrentCalls() {
+        return peakInFlight.get();
     }
 
 }
