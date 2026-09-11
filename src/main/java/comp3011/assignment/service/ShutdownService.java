@@ -1,38 +1,43 @@
 package comp3011.assignment.service;
 
 import comp3011.assignment.exception.ShutdownInProgressException;
+import comp3011.assignment.lifecycle.ApplicationTerminator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.springframework.context.ConfigurableApplicationContext;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * Decides who is allowed to shut the server down
+ *
+ * If two requests arrive at the exact same moment on different threads
+ * a plain boolean would let BOTH read false and BOTH get 202.
+ *
+ * Using compareAndSet closes that, it reads and writes in one step,
+ * so exactly one thread can never see false and flip it to true.
+ * Everyone else gets 409
+ */
 @Service
 public class ShutdownService {
-    private final ConfigurableApplicationContext context;
+    private static final Logger log = LoggerFactory.getLogger(ShutdownService.class);
+
+    private final ApplicationTerminator terminator;
 
     // two simultaneous requests can never receive 202
     private final AtomicBoolean shuttingDown = new AtomicBoolean(false);
 
-    public ShutdownService(ConfigurableApplicationContext context) {
-        this.context = context;
+    public ShutdownService(ApplicationTerminator terminator) {
+        this.terminator = terminator;
     }
 
     public void requestShutdown() {
         if (!shuttingDown.compareAndSet(false, true)) {
+            log.warn("Shutdown rejected: a graceful shutdown is already in progress");
             throw new ShutdownInProgressException();
         }
 
-        // Do the shutdown on a separate thread, so the request can send its 202 first
-        new Thread(() -> {
-            try {
-                // wait 500ms for the response to reach the client
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-
-            // stop the application
-            context.close();
-        }).start();
+        log.info("Graceful shutdown accepted.");
+        terminator.terminate();
     }
 }
