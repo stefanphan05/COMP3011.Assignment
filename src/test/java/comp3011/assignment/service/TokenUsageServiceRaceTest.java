@@ -7,6 +7,10 @@ import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -47,23 +51,36 @@ public class TokenUsageServiceRaceTest {
     void noTokenUpdatesAreLostUnderConcurrentWriters() throws Exception {
         TokenUsageService service = new TokenUsageService();
 
-        // Build 4 threads that each hammer addUsage() 50,000 times.
-        List<Thread> writers = new ArrayList<>();
+        CountDownLatch ready = new CountDownLatch(WRITER_THREADS);
+        CountDownLatch start = new CountDownLatch(1);
 
-        for (int i = 0; i < WRITER_THREADS; i++) {
-            writers.add(new Thread(() -> {
-                for (int call = 0; call < CALLS_PER_WRITER; call++) {
-                    service.addUsage(INPUT_PER_CALL, OUTPUT_PER_CALL);
-                }
-            }));
-        }
+        // One thread per task: eveyr task parks on the start gate and only
+        // releases once all of them has arrived
+        try (ExecutorService executor = Executors.newFixedThreadPool(WRITER_THREADS)) {
+            List<Future<?>> writers = new ArrayList<>();
 
-        for (Thread writer: writers) {
-            writer.start();     // run the thread in the background
-        }
+            for (int i = 0; i < WRITER_THREADS; i++) {
+                writers.add(executor.submit(() -> {
+                    ready.countDown();          // worker is ready
+                    start.await();              // wait until everyone is ready
 
-        for (Thread writer:writers) {
-            writer.join();      // waits for it to finish
+                    for (int call = 0; call < CALLS_PER_WRITER; call++) {
+                        service.addUsage(INPUT_PER_CALL, OUTPUT_PER_CALL);
+                    }
+
+                    return null;
+                }));
+            }
+
+            // Wait until every worker is ready
+            ready.await();
+
+            // fire all writers simultaneously
+            start.countDown();
+
+            for (Future<?> writer: writers) {
+                writer.get();
+            }
         }
 
         GlobalStatsResponse stats = service.currentStats();
@@ -84,48 +101,52 @@ public class TokenUsageServiceRaceTest {
     void statsNeverShowAHalfFinishedUpdate() throws Exception {
         TokenUsageService service = new TokenUsageService();
 
-        // Writers: same as above, they just keep adding usage.
-        List<Thread> writers = new ArrayList<>();
-        for (int i = 0; i < WRITER_THREADS; i++) {
-            writers.add(new Thread(() -> {
-                for (int call = 0; call < CALLS_PER_WRITER; call++) {
-                    service.addUsage(INPUT_PER_CALL, OUTPUT_PER_CALL);
-                }
-            }));
-        }
+        CountDownLatch ready = new CountDownLatch(WRITER_THREADS + READER_THREADS);
+        CountDownLatch start = new CountDownLatch(1);
 
-        // Readers: pretend to be /api/v1/global/stats requests arriving nonstop,
-        // checking every snapshot they get back.
-        List<Thread> readers = new ArrayList<>();
-        for (int i = 0; i < READER_THREADS; i++) {
-            readers.add(new Thread(() -> {
-                while (!writersFinished) {
-                    GlobalStatsResponse snapshot = service.currentStats();
+        try (ExecutorService executor = Executors.newFixedThreadPool(WRITER_THREADS + READER_THREADS)) {
+            List<Future<?>> writers = new ArrayList<>();
+            for (int i = 0; i < WRITER_THREADS; i++) {
+                writers.add(executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
 
-                    // every call adds 10 input and 1 output, so a complete snapshot must always have
-                    // input = output * 10, anything else means we read between the two updates.
-                    if (snapshot.inputTokens() != snapshot.outputTokens() * INPUT_PER_CALL) {
-                        tornSnapshot = snapshot; // remember it for the error message
+                    for (int call = 0; call < CALLS_PER_WRITER; call++) {
+                        service.addUsage(INPUT_PER_CALL, OUTPUT_PER_CALL);
                     }
-                }
-            }));
-        }
 
-        for (Thread reader : readers) {
-            reader.start();             // readers start first so they are already watching
-        }
+                    return null;
+                }));
+            }
 
-        for (Thread writer : writers) {
-            writer.start();
-        }
+            for (int i = 0; i < READER_THREADS; i++) {
+                executor.submit(() -> {
+                    ready.countDown();
+                    start.await();
 
-        for (Thread writer : writers) {
-            writer.join();              // wait for all the adding to finish
-        }
+                    while (!writersFinished) {
+                        GlobalStatsResponse snapshot = service.currentStats();
 
-        writersFinished = true;         // tell the readers they can stop
-        for (Thread reader : readers) {
-            reader.join();
+                        // THE CHECK: every call adds 10 input and 1 output, so a
+                        // complete snapshot must always have input == output * 10.
+                        // Anything else means we read between the two updates.
+                        if (snapshot.inputTokens() != snapshot.outputTokens() * INPUT_PER_CALL) {
+                            tornSnapshot = snapshot;  // remember it for the message
+                        }
+                    }
+
+                    return null;
+                });
+            }
+
+            ready.await();
+            start.countDown();
+
+            for (Future<?> writer: writers) {
+                writer.get();
+            }
+
+            writersFinished = true;         // tell the readers they can stop
         }
 
         assertThat(tornSnapshot)
